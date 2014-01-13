@@ -42,6 +42,26 @@
     (subvec (vec args) (count cmd-words))
     args))
 
+(defn parse-arglists [arglists]
+  (if (= (count arglists) 1)
+    (first arglists)
+    (let [list-count (count arglists)
+          counted-args (frequencies (reduce (fn [acc nlist] (into acc nlist)) [] arglists))]
+      (reduce (fn [acc arg-count-pair] (if (= (second arg-count-pair) list-count)
+                                         (merge-with concat {:required (first arg-count-pair)} acc)
+                                         (merge-with concat {:optional (first arg-count-pair)} acc)))
+              {} counted-args))))
+
+(defn make-option-specs [optional-args]
+  (let [to-spec (fn [opt] [(str "-" (first (str opt))) (str "--" (str opt) " " (clojure.string/upper-case (str opt)))])]
+    (try
+      (cond
+        (vector? optional-args) (vec (map to-spec optional-args))
+        (seq? optional-args) (make-option-specs (vec optional-args))
+        (nil? optional-args) []
+        :else (make-option-specs [optional-args]))
+      (catch UnsupportedOperationException ex [(to-spec optional-args)]))))
+
 (defn layout
   ([msg usage commands] (layout msg usage commands nil))
   ([msg usage commands opt-summary] (layout msg usage commands opt-summary {} nil))
@@ -84,7 +104,10 @@
          availiable-cmds (map-ns-functions (:matched-ns selected-ns-map))
          remaining-args (filter-args (:consumed-args selected-ns-map) args)
          cmd-map (get availiable-cmds (first remaining-args))
-         usage "<command> [args] [options]"
+         parsed-arglists (parse-arglists (:arglists cmd-map))
+         required-args (:required parse-arglists)
+         opt-specs (make-option-specs (:optional parse-arglists))
+         usage "command <args> [options]"
          cmd-args (rest remaining-args)
          opts {:verbose true}]
      (cond
