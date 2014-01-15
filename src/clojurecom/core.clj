@@ -1,11 +1,14 @@
 (ns clojurecom.core
   (:import (java.io StringWriter PrintWriter)
-           (clojure.lang PersistentArrayMap)))
+           (clojure.lang PersistentArrayMap))
+  (:require [clojure.string :as cs]
+            [clojure.tools.cli :as cli]
+            [clojurecom.options :as opts]))
 
 (defn ns-by-name
   ([] (ns-by-name nil))
   ([allowed-ns]
-   (reduce merge (map (fn [ns-ref] {(clojure.string/replace (str ns-ref) "." " ") ns-ref})
+   (reduce merge (map (fn [ns-ref] {(cs/replace (str ns-ref) "." " ") ns-ref})
                       (let [all (all-ns)]
                         (if allowed-ns
                           (filter (fn [ns-obj] (some #{(str ns-obj)} allowed-ns)) all)
@@ -17,7 +20,7 @@
       (if (= PersistentArrayMap (type acc))
         acc
         (let [conjoined (conj acc arg)
-              ns-candidate (clojure.string/join " " conjoined)
+              ns-candidate (cs/join " " conjoined)
               ns-obj (get ns-by-name ns-candidate)]
           (if (nil? ns-obj)
             conjoined
@@ -44,7 +47,7 @@
 
 (defn parse-arglists [arglists]
   (if (= (count arglists) 1)
-    (first arglists)
+    {:required (first arglists)}
     (let [list-count (count arglists)
           counted-args (frequencies (reduce (fn [acc nlist] (into acc nlist)) [] arglists))]
       (reduce (fn [acc arg-count-pair] (if (= (second arg-count-pair) list-count)
@@ -52,33 +55,29 @@
                                          (merge-with concat {:optional (first arg-count-pair)} acc)))
               {} counted-args))))
 
-(defn make-option-specs [optional-args]
-  (let [to-spec (fn [opt] [(str "-" (first (str opt))) (str "--" (str opt) " " (clojure.string/upper-case (str opt)))])]
-    (try
-      (cond
-        (vector? optional-args) (vec (map to-spec optional-args))
-        (seq? optional-args) (make-option-specs (vec optional-args))
-        (nil? optional-args) []
-        :else (make-option-specs [optional-args]))
-      (catch UnsupportedOperationException ex [(to-spec optional-args)]))))
+(defn make-fn-args [arglists args opts]
+  ;TODO
+  (let [{required-args :required allowed-opts :optional} (parse-arglists arglists)]
+    args))
 
 (defn layout
-  ([msg usage commands] (layout msg usage commands nil))
-  ([msg usage commands opt-summary] (layout msg usage commands opt-summary {} nil))
-  ([msg usage commands opt-summary opts ex]
-   (str msg "\n"
+  ([{msg :msg usage :usage commands :cmds opt-summary :opts ex :ex}]
+   (str (or msg ex) "\n"
         "Usage: " usage "\n"
         (if (and commands (> (count commands) 0))
           (str "\n"
                "Commands:\n"
-               (clojure.string/join
-                 (map (fn [cmd-map] (format "%-15s - %-75s\n" (first cmd-map) (:doc (second cmd-map))))
+               (cs/join
+                 (map (fn [cmd-map]
+                        (let [cmd (first cmd-map)
+                              doc (:doc (second cmd-map))]
+                          (if doc (format "%-20s - %-75s\n" cmd doc) (format "%-20s\n" cmd))))
                       commands)))
           "")
         (if opt-summary
           (str "\nOptions:\n" opt-summary)
           "")
-        (if (and opts (:verbose opts) ex)
+        (if ex
           (let [sw (StringWriter.)
                 pw (PrintWriter. sw)]
             (.printStackTrace ex pw)
@@ -88,12 +87,17 @@
   "Runs :fn from the given cmd-map with the given args and opts. Returns the result of the function call.
    If an exception occurs, a formated output string composed of :name and :arglists from cmd-map will be
    returned instead."
-  [cmd-map args opts]
-  (try
-    ;TODO check number of args and handle opts as named parameters
-    (apply (:fn cmd-map) args)
-    (catch Exception ex
-      (layout ex (str (:name cmd-map) " " (:arglists cmd-map)) nil nil opts ex))))
+  [cmd-map args]
+  (let [parsed-arglist-map (parse-arglists (:arglists cmd-map))
+        required-args (:required parsed-arglist-map)
+        opt-specs (opts/make-option-specs (:optional parsed-arglist-map))
+        usage (str (:name cmd-map) " " (:arglists cmd-map))
+        {parsed-opts :options remaining-args :arguments summary :summary errors :errors} (cli/parse-opts args opt-specs)
+        fn-args (make-fn-args (:arglists cmd-map) remaining-args parsed-opts)]
+    (try
+      (apply (:fn cmd-map) fn-args)
+      (catch Exception ex
+        (layout {:usage usage :ex ex :opts summary})))))
 
 (defn run
   "Parses args to find and run a command. If cmd-namespaces are given then only commands in those namespaces will be
@@ -104,22 +108,28 @@
          availiable-cmds (map-ns-functions (:matched-ns selected-ns-map))
          remaining-args (filter-args (:consumed-args selected-ns-map) args)
          cmd-map (get availiable-cmds (first remaining-args))
-         parsed-arglists (parse-arglists (:arglists cmd-map))
-         required-args (:required parse-arglists)
-         opt-specs (make-option-specs (:optional parse-arglists))
          usage "command <args> [options]"
-         cmd-args (rest remaining-args)
-         opts {:verbose true}]
+         cmd-args (rest remaining-args)]
      (cond
-       (or (= 0 (count args)) (= 0 (count remaining-args))) (println (layout "No command specified." usage availiable-cmds))
-       (= nil cmd-map) (println (layout "Unrecognized command." usage availiable-cmds))
+       (or (= 0 (count args)) (= 0 (count remaining-args))) (layout {:msg "No command specified." :usage usage :cmds availiable-cmds})
+       (= nil cmd-map) (layout {:msg "Unrecognized command." :usage usage :cmds availiable-cmds})
        :else (try
-               (run-command cmd-map cmd-args opts)
+               (run-command cmd-map cmd-args)
                (catch Exception ex
-                 (println (layout ex usage availiable-cmds nil opts ex))))))))
+                 (layout {:usage usage :cmds availiable-cmds :ex ex})))))))
 
 (defn run-and-print [args]
-  (println (run args)))
+  (let [result (run args)]
+    (if-not (nil? result)
+      (println result))))
 
 (defn -main [& args]
   (run-and-print args))
+
+; TODO remove
+(defn test-fn
+  ([arg1] (str arg1))
+  ([arg1 arg2] (str arg1 " " arg2))
+  ([{arg1 :first arg2 :second} arg3 arg4] (str arg1 " " arg2)))
+; TODO remove
+(run ["clojurecom" "core" "test-fn" "cat"])
